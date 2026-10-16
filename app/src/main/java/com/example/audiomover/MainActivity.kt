@@ -2,61 +2,158 @@ package com.example.audiomover
 
 import android.Manifest
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
-import android.widget.ArrayAdapter
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
 import android.widget.Button
-import android.widget.EditText
-import android.widget.ListView
+import android.widget.CheckBox
 import android.widget.TextView
 import android.widget.Toast
+import androidx.recyclerview.widget.ItemTouchHelper
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+
+private const val REQ_MOVE = 100
+private const val REQ_DELETE = 101
+private const val LIB_PATH = "Music/AudioMover/"
+
+data class Audio(val id: Long, val uri: Uri, val name: String, val folder: String)
+
+class VH(v: View) : RecyclerView.ViewHolder(v) {
+    val check: CheckBox = v.findViewById(R.id.check)
+    val name: TextView = v.findViewById(R.id.name)
+    val folder: TextView = v.findViewById(R.id.folder)
+}
 
 class MainActivity : Activity() {
 
-    private data class Audio(val uri: Uri, val name: String, val folder: String)
+    private val downloads = mutableListOf<Audio>()
+    private val library = mutableListOf<Audio>()
+    private var shown: MutableList<Audio> = downloads
+    private val selected = mutableSetOf<Long>()
+    private var inLibrary = false
+    private var pendingUris: List<Uri> = emptyList()
 
-    private val audios = mutableListOf<Audio>()
-    private lateinit var listView: ListView
+    private lateinit var recycler: RecyclerView
     private lateinit var status: TextView
-    private var pendingMove: Pair<Audio, String>? = null
+    private lateinit var btnDownloads: Button
+    private lateinit var btnLibrary: Button
+    private lateinit var btnMove: Button
+    private lateinit var adapter: AudioAdapter
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        listView = findViewById(R.id.list)
-        status = findViewById(R.id.status)
 
+        recycler = findViewById(R.id.recycler)
+        status = findViewById(R.id.status)
+        btnDownloads = findViewById(R.id.btnDownloads)
+        btnLibrary = findViewById(R.id.btnLibrary)
+        btnMove = findViewById(R.id.btnMove)
+
+        adapter = AudioAdapter()
+        recycler.layoutManager = LinearLayoutManager(this)
+        recycler.adapter = adapter
+
+        // Arrastrar para reordenar (mantener pulsado) solo en "Mi música"
+        val callback = object : ItemTouchHelper.SimpleCallback(
+            ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0
+        ) {
+            override fun isLongPressDragEnabled(): Boolean = inLibrary
+
+            override fun onMove(
+                rv: RecyclerView,
+                vh: RecyclerView.ViewHolder,
+                target: RecyclerView.ViewHolder
+            ): Boolean {
+                val from = vh.bindingAdapterPosition
+                val to = target.bindingAdapterPosition
+                if (from == RecyclerView.NO_POSITION || to == RecyclerView.NO_POSITION) return false
+                shown.add(to, shown.removeAt(from))
+                adapter.notifyItemMoved(from, to)
+                return true
+            }
+
+            override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
+
+            override fun clearView(rv: RecyclerView, vh: RecyclerView.ViewHolder) {
+                super.clearView(rv, vh)
+                if (inLibrary) saveOrder()
+            }
+        }
+        ItemTouchHelper(callback).attachToRecyclerView(recycler)
+
+        btnDownloads.setOnClickListener { inLibrary = false; refresh() }
+        btnLibrary.setOnClickListener { inLibrary = true; refresh() }
+
+        findViewById<Button>(R.id.btnAll).setOnClickListener {
+            if (selected.size == shown.size) selected.clear()
+            else selected.addAll(shown.map { it.id })
+            adapter.notifyDataSetChanged()
+        }
+        btnMove.setOnClickListener {
+            val sel = shown.filter { it.id in selected }
+            if (sel.isEmpty()) toast("Marca al menos un audio") else requestMove(sel)
+        }
+        findViewById<Button>(R.id.btnDelete).setOnClickListener {
+            val sel = shown.filter { it.id in selected }
+            if (sel.isEmpty()) toast("Marca al menos un audio") else requestDelete(sel)
+        }
+        findViewById<Button>(R.id.btnPrev).setOnClickListener { sendToService(PlayerService.ACTION_PREV) }
         findViewById<Button>(R.id.btnToggle).setOnClickListener { sendToService(PlayerService.ACTION_TOGGLE) }
+        findViewById<Button>(R.id.btnNext).setOnClickListener { sendToService(PlayerService.ACTION_NEXT) }
         findViewById<Button>(R.id.btnStop).setOnClickListener { sendToService(PlayerService.ACTION_STOP) }
 
-        listView.setOnItemClickListener { _, _, pos, _ -> playAudio(audios[pos]) }
-        listView.setOnItemLongClickListener { _, _, pos, _ -> askDestination(audios[pos]); true }
+        askPermissions()
+    }
 
-        val perms = if (Build.VERSION.SDK_INT >= 33)
-            arrayOf(Manifest.permission.READ_MEDIA_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
-        else
-            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
-        if (perms.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) {
+    override fun onResume() {
+        super.onResume()
+        PlayerService.onTrackChanged = { t -> runOnUiThread { showNow(t) } }
+        if (hasAudioPermission()) {
             loadAudios()
         } else {
-            requestPermissions(perms, 1)
+            status.text = "Falta el permiso de audio. Actívalo en Ajustes > Apps > Audio Mover."
         }
     }
 
-    override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, results: IntArray) {
-        super.onRequestPermissionsResult(code, perms, results)
-        loadAudios()
+    override fun onPause() {
+        PlayerService.onTrackChanged = null
+        super.onPause()
     }
 
+    // ---------- Permisos ----------
+    private fun askPermissions() {
+        val wanted = if (Build.VERSION.SDK_INT >= 33)
+            arrayOf(Manifest.permission.READ_MEDIA_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
+        else
+            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        val missing = wanted.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), 1)
+    }
+
+    private fun hasAudioPermission(): Boolean {
+        val p = if (Build.VERSION.SDK_INT >= 33)
+            Manifest.permission.READ_MEDIA_AUDIO
+        else
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        return checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
+    }
+
+    // ---------- Cargar listas ----------
     private fun loadAudios() {
-        audios.clear()
+        val dl = mutableListOf<Audio>()
+        val lib = mutableListOf<Audio>()
+        val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
         val projection = arrayOf(
             MediaStore.Audio.Media._ID,
             MediaStore.Audio.Media.DISPLAY_NAME,
@@ -64,78 +161,148 @@ class MainActivity : Activity() {
         )
         try {
             contentResolver.query(
-                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, projection, null, null,
+                collection, projection, null, null,
                 MediaStore.Audio.Media.DISPLAY_NAME + " ASC"
             )?.use { c ->
                 while (c.moveToNext()) {
                     val id = c.getLong(0)
-                    audios.add(
-                        Audio(
-                            ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id),
-                            c.getString(1) ?: "?",
-                            c.getString(2) ?: ""
-                        )
-                    )
+                    val name = c.getString(1) ?: "?"
+                    val path = c.getString(2) ?: ""
+                    val audio = Audio(id, ContentUris.withAppendedId(collection, id), name, path)
+                    when {
+                        path.startsWith(LIB_PATH) -> lib.add(audio)
+                        path.startsWith("Download") -> dl.add(audio)
+                    }
                 }
             }
         } catch (e: SecurityException) {
             status.text = "Falta el permiso de audio."
             return
         }
-        val labels = audios.map { "${it.name}\n${it.folder}" }
-        listView.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, labels)
-        status.text = "${audios.size} audios. Toca = reproducir, mantener = mover."
+
+        // Orden guardado de "Mi música"; los nuevos se agregan al final
+        val order = savedOrder()
+        val known = order.toSet()
+        val byId = lib.associateBy { it.id }
+        val ordered = order.mapNotNull { byId[it] } + lib.filter { it.id !in known }
+
+        downloads.clear()
+        downloads.addAll(dl)
+        library.clear()
+        library.addAll(ordered)
+        saveOrder()
+        refresh()
     }
 
-    private fun playAudio(a: Audio) {
+    private fun savedOrder(): List<Long> =
+        (getSharedPreferences("prefs", MODE_PRIVATE).getString("order", "") ?: "")
+            .split(",").mapNotNull { it.toLongOrNull() }
+
+    private fun saveOrder() {
+        getSharedPreferences("prefs", MODE_PRIVATE).edit()
+            .putString("order", library.joinToString(",") { it.id.toString() })
+            .apply()
+    }
+
+    private fun refresh() {
+        shown = if (inLibrary) library else downloads
+        selected.clear()
+        btnDownloads.text = "Descargas (${downloads.size})"
+        btnLibrary.text = "Mi música (${library.size})"
+        btnDownloads.alpha = if (inLibrary) 0.5f else 1f
+        btnLibrary.alpha = if (inLibrary) 1f else 0.5f
+        btnMove.visibility = if (inLibrary) View.GONE else View.VISIBLE
+        showNow(PlayerService.currentTitle)
+    }
+
+    private fun showNow(title: String) {
+        status.text = when {
+            title.isNotEmpty() -> "Reproduciendo: $title"
+            inLibrary -> "Toca para reproducir. Mantén pulsado y arrastra para cambiar el orden."
+            else -> "Marca audios y pásalos a Mi música. Toca uno para reproducir."
+        }
+        adapter.notifyDataSetChanged()
+    }
+
+    // ---------- Reproducir ----------
+    private fun playFrom(pos: Int) {
+        if (pos < 0 || pos >= shown.size) return
         val i = Intent(this, PlayerService::class.java)
-            .setAction(PlayerService.ACTION_PLAY)
-            .setData(a.uri)
-            .putExtra("title", a.name)
+            .setAction(PlayerService.ACTION_PLAY_LIST)
+            .putStringArrayListExtra("uris", ArrayList(shown.map { it.uri.toString() }))
+            .putStringArrayListExtra("titles", ArrayList(shown.map { it.name }))
+            .putExtra("index", pos)
         startForegroundService(i)
-        status.text = "Reproduciendo: ${a.name}"
     }
 
     private fun sendToService(action: String) {
         startService(Intent(this, PlayerService::class.java).setAction(action))
     }
 
-    private fun askDestination(a: Audio) {
-        val input = EditText(this).apply { hint = "Ej: Podcasts/Favoritos" }
-        AlertDialog.Builder(this)
-            .setTitle("Mover a Music/...")
-            .setMessage("Escribe la carpeta destino dentro de Music (se crea si no existe).")
-            .setView(input)
-            .setPositiveButton("Mover") { _, _ ->
-                val dest = input.text.toString().trim().trim('/')
-                if (dest.isNotEmpty()) requestMove(a, dest)
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
+    // ---------- Mover y eliminar ----------
+    private fun requestMove(sel: List<Audio>) {
+        pendingUris = sel.map { it.uri }
+        val pi = MediaStore.createWriteRequest(contentResolver, pendingUris)
+        startIntentSenderForResult(pi.intentSender, REQ_MOVE, null, 0, 0, 0)
     }
 
-    private fun requestMove(a: Audio, dest: String) {
-        pendingMove = a to dest
-        val pi = MediaStore.createWriteRequest(contentResolver, listOf(a.uri))
-        startIntentSenderForResult(pi.intentSender, 100, null, 0, 0, 0)
+    private fun requestDelete(sel: List<Audio>) {
+        val pi = MediaStore.createDeleteRequest(contentResolver, sel.map { it.uri })
+        startIntentSenderForResult(pi.intentSender, REQ_DELETE, null, 0, 0, 0)
     }
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == 100 && resultCode == RESULT_OK) {
-            val (a, dest) = pendingMove ?: return
-            try {
-                val v = ContentValues().apply {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, "Music/$dest/")
+        if (resultCode != RESULT_OK) return
+        when (requestCode) {
+            REQ_MOVE -> {
+                var ok = 0
+                for (u in pendingUris) {
+                    try {
+                        val v = ContentValues().apply {
+                            put(MediaStore.MediaColumns.RELATIVE_PATH, LIB_PATH)
+                        }
+                        if (contentResolver.update(u, v, null, null) > 0) ok++
+                    } catch (e: Exception) {
+                    }
                 }
-                contentResolver.update(a.uri, v, null, null)
-                Toast.makeText(this, "Movido a Music/$dest", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) {
-                Toast.makeText(this, "No se pudo mover: ${e.message}", Toast.LENGTH_LONG).show()
+                toast("Movidos $ok de ${pendingUris.size} a Mi música")
+                loadAudios()
             }
-            pendingMove = null
-            loadAudios()
+            REQ_DELETE -> {
+                toast("Eliminado")
+                loadAudios()
+            }
+        }
+    }
+
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+
+    // ---------- Adaptador ----------
+    private inner class AudioAdapter : RecyclerView.Adapter<VH>() {
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH =
+            VH(LayoutInflater.from(parent.context).inflate(R.layout.item_audio, parent, false))
+
+        override fun getItemCount(): Int = shown.size
+
+        override fun onBindViewHolder(h: VH, position: Int) {
+            val a = shown[position]
+            h.name.text = a.name
+            h.folder.text = a.folder
+            h.name.setTypeface(
+                null,
+                if (a.name == PlayerService.currentTitle) Typeface.BOLD else Typeface.NORMAL
+            )
+            h.check.setOnCheckedChangeListener(null)
+            h.check.isChecked = selected.contains(a.id)
+            h.check.setOnCheckedChangeListener { _, on ->
+                if (on) selected.add(a.id) else selected.remove(a.id)
+            }
+            h.itemView.setOnClickListener {
+                val pos = h.bindingAdapterPosition
+                if (pos != RecyclerView.NO_POSITION) playFrom(pos)
+            }
         }
     }
 }
