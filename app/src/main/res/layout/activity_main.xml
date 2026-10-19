@@ -3,8 +3,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="8dp"
-    android:background="@drawable/fondo">
+    android:padding="8dp">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -28,11 +27,21 @@
             android:text="Mi música" />
     </LinearLayout>
 
+    <EditText
+        android:id="@+id/search"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Buscar"
+        android:imeOptions="actionSearch"
+        android:inputType="text"
+        android:maxLines="1"
+        android:textSize="15sp" />
+
     <TextView
         android:id="@+id/status"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:padding="8dp"
+        android:padding="6dp"
         android:textSize="13sp" />
 
     <androidx.recyclerview.widget.RecyclerView
@@ -40,39 +49,6 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal">
-
-        <Button
-            android:id="@+id/btnAll"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textSize="11sp"
-            android:textAllCaps="false"
-            android:text="Marcar todo" />
-
-        <Button
-            android:id="@+id/btnMove"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textSize="11sp"
-            android:textAllCaps="false"
-            android:text="Pasar a Mi música" />
-
-        <Button
-            android:id="@+id/btnDelete"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textSize="11sp"
-            android:textAllCaps="false"
-            android:text="Eliminar" />
-    </LinearLayout>
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -108,40 +84,62 @@
         android:layout_height="wrap_content"
         android:orientation="horizontal">
 
-        <Button
+        <ImageButton
+            android:id="@+id/btnShuffle"
+            android:layout_width="0dp"
+            android:layout_height="52dp"
+            android:layout_weight="1"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Aleatorio"
+            android:src="@drawable/ic_shuffle" />
+
+        <ImageButton
             android:id="@+id/btnPrev"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="52dp"
             android:layout_weight="1"
-            android:textSize="11sp"
-            android:textAllCaps="false"
-            android:text="Anterior" />
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Anterior"
+            android:src="@drawable/ic_prev"
+            android:tint="#333333" />
 
-        <Button
+        <ImageButton
             android:id="@+id/btnToggle"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="52dp"
             android:layout_weight="1"
-            android:textSize="11sp"
-            android:textAllCaps="false"
-            android:text="Pausa/Play" />
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Pausa o reproducir"
+            android:src="@drawable/ic_play"
+            android:tint="#333333" />
 
-        <Button
+        <ImageButton
             android:id="@+id/btnNext"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="52dp"
             android:layout_weight="1"
-            android:textSize="11sp"
-            android:textAllCaps="false"
-            android:text="Siguiente" />
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Siguiente"
+            android:src="@drawable/ic_next"
+            android:tint="#333333" />
 
-        <Button
+        <ImageButton
+            android:id="@+id/btnRepeat"
+            android:layout_width="0dp"
+            android:layout_height="52dp"
+            android:layout_weight="1"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Repetir"
+            android:src="@drawable/ic_repeat" />
+
+        <ImageButton
             android:id="@+id/btnStop"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="52dp"
             android:layout_weight="1"
-            android:textSize="11sp"
-            android:textAllCaps="false"
-            android:text="Parar" />
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Parar"
+            android:src="@drawable/ic_stop"
+            android:tint="#333333" />
     </LinearLayout>
 </LinearLayout>

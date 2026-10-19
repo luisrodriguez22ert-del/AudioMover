@@ -5,7 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -24,6 +27,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import androidx.core.content.ContextCompat
 
 class PlayerService : Service() {
 
@@ -34,17 +38,23 @@ class PlayerService : Service() {
         const val ACTION_PREV = "prev"
         const val ACTION_STOP = "stop"
         const val ACTION_SEEK = "seek"
+        const val ACTION_MODE = "mode"
         const val CHANNEL_ID = "playback_v2"
 
         var currentTitle: String = ""
         var onTrackChanged: ((String) -> Unit)? = null
         var playerRef: MediaPlayer? = null
+
+        var shuffle = false
+        var repeatMode = 0 // 0 = no repetir, 1 = toda la lista, 2 = una canción
     }
 
     private var player: MediaPlayer? = null
     private var uris: List<Uri> = emptyList()
     private var titles: List<String> = emptyList()
-    private var index = 0
+    private var order: List<Int> = emptyList()
+    private var pos = 0
+    private var failures = 0
 
     private var displayTitle = ""
     private var artist = "Audio Mover"
@@ -65,6 +75,13 @@ class PlayerService : Service() {
         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
         .build()
 
+    // Pausa cuando se desconectan audífonos o Bluetooth
+    private val noisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) pauseIt()
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -78,6 +95,11 @@ class PlayerService : Service() {
             override fun onSeekTo(pos: Long) = seekTo(pos.toInt())
             override fun onStop() = stopAll()
         })
+        ContextCompat.registerReceiver(
+            this, noisyReceiver,
+            IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -85,17 +107,37 @@ class PlayerService : Service() {
             ACTION_PLAY_LIST -> {
                 uris = intent.getStringArrayListExtra("uris")?.map { Uri.parse(it) } ?: emptyList()
                 titles = intent.getStringArrayListExtra("titles") ?: arrayListOf()
-                index = intent.getIntExtra("index", 0)
-                playCurrent()
+                if (uris.isEmpty()) {
+                    showForeground()
+                    stopAll()
+                } else {
+                    buildOrder(intent.getIntExtra("index", 0).coerceIn(0, uris.size - 1))
+                    failures = 0
+                    playCurrent()
+                }
             }
             ACTION_TOGGLE -> toggle()
             ACTION_NEXT -> next()
             ACTION_PREV -> prev()
             ACTION_SEEK -> seekTo(intent.getIntExtra("pos", 0))
+            ACTION_MODE -> if (order.isNotEmpty() && pos in order.indices) buildOrder(order[pos])
             ACTION_STOP -> stopAll()
         }
         if (player == null) stopSelf()
         return START_NOT_STICKY
+    }
+
+    // ---------- Orden de reproducción (normal o aleatorio) ----------
+    private fun buildOrder(startIndex: Int) {
+        val n = uris.size
+        if (shuffle) {
+            val rest = (0 until n).filter { it != startIndex }.shuffled()
+            order = listOf(startIndex) + rest
+            pos = 0
+        } else {
+            order = (0 until n).toList()
+            pos = startIndex
+        }
     }
 
     // ---------- Reproducción ----------
@@ -111,18 +153,19 @@ class PlayerService : Service() {
     }
 
     private fun playCurrent() {
-        if (index < 0 || index >= uris.size) {
+        if (order.isEmpty() || pos !in order.indices) {
             stopAll()
             return
         }
-        val file = titles.getOrElse(index) { "Reproduciendo" }
+        val i = order[pos]
+        val file = titles.getOrElse(i) { "Reproduciendo" }
         currentTitle = file
         displayTitle = file.substringBeforeLast('.')
         artist = "Audio Mover"
         art = null
         durationMs = 0L
         showForeground()
-        loadMeta(uris[index])
+        loadMeta(uris[i])
         onTrackChanged?.invoke(file)
         requestFocus()
         releasePlayer()
@@ -131,19 +174,26 @@ class PlayerService : Service() {
         try {
             p.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK)
             p.setAudioAttributes(attrs)
-            p.setDataSource(this, uris[index])
-            p.setOnCompletionListener { handler.post { next() } }
+            p.setDataSource(this, uris[i])
+            p.setOnCompletionListener {
+                handler.post {
+                    if (player === p) {
+                        if (repeatMode == 2) playCurrent() else next()
+                    }
+                }
+            }
             p.setOnErrorListener { _, _, _ ->
-                handler.post { next() }
+                handler.post { if (player === p) skipBroken() }
                 true
             }
             p.prepare()
             p.start()
         } catch (e: Exception) {
             p.release()
-            next() // salta archivos dañados
+            skipBroken()
             return
         }
+        failures = 0
         setPlayer(p)
         durationMs = p.duration.toLong()
         session.isActive = true
@@ -151,9 +201,26 @@ class PlayerService : Service() {
         refreshAll()
     }
 
+    private fun skipBroken() {
+        failures++
+        if (failures >= order.size) {
+            failures = 0
+            stopAll()
+        } else {
+            next()
+        }
+    }
+
     private fun next() {
-        if (index + 1 < uris.size) {
-            index++
+        if (order.isEmpty()) {
+            stopAll()
+            return
+        }
+        if (pos + 1 < order.size) {
+            pos++
+            playCurrent()
+        } else if (repeatMode == 1) {
+            pos = 0
             playCurrent()
         } else {
             stopAll()
@@ -167,7 +234,7 @@ class PlayerService : Service() {
             refreshAll()
             return
         }
-        if (index > 0) index--
+        if (pos > 0) pos-- else if (repeatMode == 1 && order.isNotEmpty()) pos = order.size - 1
         playCurrent()
     }
 
@@ -177,7 +244,8 @@ class PlayerService : Service() {
     }
 
     private fun pauseIt() {
-        player?.pause()
+        val p = player ?: return
+        if (p.isPlaying) p.pause()
         pausedByFocus = false
         refreshAll()
     }
@@ -190,6 +258,7 @@ class PlayerService : Service() {
     }
 
     private fun seekTo(ms: Int) {
+        if (player == null) return
         player?.seekTo(ms)
         refreshAll()
     }
@@ -239,7 +308,7 @@ class PlayerService : Service() {
             p.isPlaying -> PlaybackState.STATE_PLAYING
             else -> PlaybackState.STATE_PAUSED
         }
-        val pos = p?.currentPosition?.toLong() ?: 0L
+        val position = p?.currentPosition?.toLong() ?: 0L
         session.setPlaybackState(
             PlaybackState.Builder()
                 .setActions(
@@ -248,7 +317,7 @@ class PlayerService : Service() {
                         PlaybackState.ACTION_SKIP_TO_PREVIOUS or PlaybackState.ACTION_SEEK_TO or
                         PlaybackState.ACTION_STOP
                 )
-                .setState(state, pos, 1f)
+                .setState(state, position, 1f)
                 .build()
         )
     }
@@ -349,6 +418,7 @@ class PlayerService : Service() {
     private fun stopAll() {
         releasePlayer()
         currentTitle = ""
+        failures = 0
         onTrackChanged?.invoke("")
         session.isActive = false
         focusRequest?.let { getSystemService(AudioManager::class.java).abandonAudioFocusRequest(it) }
@@ -357,6 +427,10 @@ class PlayerService : Service() {
     }
 
     override fun onDestroy() {
+        try {
+            unregisterReceiver(noisyReceiver)
+        } catch (e: Exception) {
+        }
         releasePlayer()
         session.release()
         super.onDestroy()
