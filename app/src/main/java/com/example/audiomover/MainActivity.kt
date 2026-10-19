@@ -10,12 +10,15 @@ import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.recyclerview.widget.ItemTouchHelper
@@ -49,6 +52,36 @@ class MainActivity : Activity() {
     private lateinit var btnLibrary: Button
     private lateinit var btnMove: Button
     private lateinit var adapter: AudioAdapter
+    private lateinit var seek: SeekBar
+    private lateinit var tvPos: TextView
+    private lateinit var tvDur: TextView
+    private var dragging = false
+    private val ticker = Handler(Looper.getMainLooper())
+    private val tick = object : Runnable {
+        override fun run() {
+            val p = PlayerService.playerRef
+            if (p == null) {
+                if (!dragging) {
+                    seek.progress = 0
+                    tvPos.text = "0:00"
+                    tvDur.text = "0:00"
+                }
+            } else if (!dragging) {
+                try {
+                    val d = p.duration
+                    val c = p.currentPosition
+                    if (d > 0) {
+                        seek.max = d
+                        seek.progress = c
+                        tvPos.text = fmt(c)
+                        tvDur.text = fmt(d)
+                    }
+                } catch (e: Exception) {
+                }
+            }
+            ticker.postDelayed(this, 500)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,6 +92,28 @@ class MainActivity : Activity() {
         btnDownloads = findViewById(R.id.btnDownloads)
         btnLibrary = findViewById(R.id.btnLibrary)
         btnMove = findViewById(R.id.btnMove)
+        seek = findViewById(R.id.seek)
+        tvPos = findViewById(R.id.tvPos)
+        tvDur = findViewById(R.id.tvDur)
+
+        seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) tvPos.text = fmt(progress)
+            }
+
+            override fun onStartTrackingTouch(sb: SeekBar) {
+                dragging = true
+            }
+
+            override fun onStopTrackingTouch(sb: SeekBar) {
+                dragging = false
+                startService(
+                    Intent(this@MainActivity, PlayerService::class.java)
+                        .setAction(PlayerService.ACTION_SEEK)
+                        .putExtra("pos", sb.progress)
+                )
+            }
+        })
 
         adapter = AudioAdapter()
         recycler.layoutManager = LinearLayoutManager(this)
@@ -119,6 +174,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         PlayerService.onTrackChanged = { t -> runOnUiThread { showNow(t) } }
+        ticker.post(tick)
         if (hasAudioPermission()) {
             loadAudios()
         } else {
@@ -128,6 +184,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         PlayerService.onTrackChanged = null
+        ticker.removeCallbacks(tick)
         super.onPause()
     }
 
@@ -275,6 +332,11 @@ class MainActivity : Activity() {
                 loadAudios()
             }
         }
+    }
+
+    private fun fmt(ms: Int): String {
+        val s = ms / 1000
+        return "%d:%02d".format(s / 60, s % 60)
     }
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()

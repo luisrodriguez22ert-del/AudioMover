@@ -7,10 +7,18 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.graphics.drawable.Icon
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.media.MediaMetadata
+import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Handler
 import android.os.IBinder
@@ -25,19 +33,32 @@ class PlayerService : Service() {
         const val ACTION_NEXT = "next"
         const val ACTION_PREV = "prev"
         const val ACTION_STOP = "stop"
-        const val CHANNEL_ID = "playback"
+        const val ACTION_SEEK = "seek"
+        const val CHANNEL_ID = "playback_v2"
 
         var currentTitle: String = ""
         var onTrackChanged: ((String) -> Unit)? = null
+        var playerRef: MediaPlayer? = null
     }
 
     private var player: MediaPlayer? = null
     private var uris: List<Uri> = emptyList()
     private var titles: List<String> = emptyList()
     private var index = 0
+
+    private var displayTitle = ""
+    private var artist = "Audio Mover"
+    private var art: Bitmap? = null
+    private var durationMs = 0L
+
+    private lateinit var session: MediaSession
     private var focusRequest: AudioFocusRequest? = null
     private var pausedByFocus = false
     private val handler = Handler(Looper.getMainLooper())
+
+    private val defaultArt: Bitmap by lazy {
+        BitmapFactory.decodeResource(resources, R.drawable.ic_launcher)
+    }
 
     private val attrs = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -45,6 +66,19 @@ class PlayerService : Service() {
         .build()
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        session = MediaSession(this, "AudioMover")
+        session.setCallback(object : MediaSession.Callback() {
+            override fun onPlay() = resume()
+            override fun onPause() = pauseIt()
+            override fun onSkipToNext() = next()
+            override fun onSkipToPrevious() = prev()
+            override fun onSeekTo(pos: Long) = seekTo(pos.toInt())
+            override fun onStop() = stopAll()
+        })
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -57,9 +91,23 @@ class PlayerService : Service() {
             ACTION_TOGGLE -> toggle()
             ACTION_NEXT -> next()
             ACTION_PREV -> prev()
+            ACTION_SEEK -> seekTo(intent.getIntExtra("pos", 0))
             ACTION_STOP -> stopAll()
         }
+        if (player == null) stopSelf()
         return START_NOT_STICKY
+    }
+
+    // ---------- Reproducción ----------
+    private fun setPlayer(p: MediaPlayer?) {
+        player = p
+        playerRef = p
+    }
+
+    private fun releasePlayer() {
+        val p = player
+        setPlayer(null)
+        p?.release()
     }
 
     private fun playCurrent() {
@@ -67,32 +115,40 @@ class PlayerService : Service() {
             stopAll()
             return
         }
-        val title = titles.getOrElse(index) { "Reproduciendo" }
-        currentTitle = title
+        val file = titles.getOrElse(index) { "Reproduciendo" }
+        currentTitle = file
+        displayTitle = file.substringBeforeLast('.')
+        artist = "Audio Mover"
+        art = null
+        durationMs = 0L
         showForeground()
-        onTrackChanged?.invoke(title)
+        loadMeta(uris[index])
+        onTrackChanged?.invoke(file)
         requestFocus()
+        releasePlayer()
 
-        player?.release()
-        player = null
+        val p = MediaPlayer()
         try {
-            player = MediaPlayer().apply {
-                setWakeMode(this@PlayerService, PowerManager.PARTIAL_WAKE_LOCK)
-                setAudioAttributes(attrs)
-                setDataSource(this@PlayerService, uris[index])
-                setOnCompletionListener { handler.post { next() } }
-                setOnErrorListener { _, _, _ ->
-                    handler.post { next() }
-                    true
-                }
-                prepare()
-                start()
+            p.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK)
+            p.setAudioAttributes(attrs)
+            p.setDataSource(this, uris[index])
+            p.setOnCompletionListener { handler.post { next() } }
+            p.setOnErrorListener { _, _, _ ->
+                handler.post { next() }
+                true
             }
-            updateNotification()
+            p.prepare()
+            p.start()
         } catch (e: Exception) {
-            // Si un archivo falla, salta al siguiente
-            next()
+            p.release()
+            next() // salta archivos dañados
+            return
         }
+        setPlayer(p)
+        durationMs = p.duration.toLong()
+        session.isActive = true
+        updateMetadata()
+        refreshAll()
     }
 
     private fun next() {
@@ -108,6 +164,7 @@ class PlayerService : Service() {
         val p = player
         if (p != null && p.currentPosition > 3000) {
             p.seekTo(0)
+            refreshAll()
             return
         }
         if (index > 0) index--
@@ -116,16 +173,87 @@ class PlayerService : Service() {
 
     private fun toggle() {
         val p = player ?: return
-        if (p.isPlaying) {
-            p.pause()
-        } else {
-            requestFocus()
-            p.start()
-        }
-        pausedByFocus = false
-        updateNotification()
+        if (p.isPlaying) pauseIt() else resume()
     }
 
+    private fun pauseIt() {
+        player?.pause()
+        pausedByFocus = false
+        refreshAll()
+    }
+
+    private fun resume() {
+        val p = player ?: return
+        requestFocus()
+        p.start()
+        refreshAll()
+    }
+
+    private fun seekTo(ms: Int) {
+        player?.seekTo(ms)
+        refreshAll()
+    }
+
+    // ---------- Metadatos (título, artista, carátula) ----------
+    private fun loadMeta(uri: Uri) {
+        val r = MediaMetadataRetriever()
+        try {
+            r.setDataSource(this, uri)
+            r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
+                ?.takeIf { it.isNotBlank() }?.let { displayTitle = it }
+            r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
+                ?.takeIf { it.isNotBlank() }?.let { artist = it }
+            r.embeddedPicture?.let {
+                art = BitmapFactory.decodeByteArray(it, 0, it.size)?.let { b -> scaled(b) }
+            }
+        } catch (e: Exception) {
+            // sin etiquetas: se usa el nombre del archivo
+        } finally {
+            r.release()
+        }
+    }
+
+    private fun scaled(b: Bitmap): Bitmap {
+        val max = 512
+        val s = maxOf(b.width, b.height)
+        if (s <= max) return b
+        val f = max.toFloat() / s
+        return Bitmap.createScaledBitmap(b, (b.width * f).toInt(), (b.height * f).toInt(), true)
+    }
+
+    private fun updateMetadata() {
+        session.setMetadata(
+            MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_TITLE, displayTitle)
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
+                .putLong(MediaMetadata.METADATA_KEY_DURATION, durationMs)
+                .putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, art ?: defaultArt)
+                .build()
+        )
+    }
+
+    private fun updateSession() {
+        val p = player
+        val state = when {
+            p == null -> PlaybackState.STATE_STOPPED
+            p.isPlaying -> PlaybackState.STATE_PLAYING
+            else -> PlaybackState.STATE_PAUSED
+        }
+        val pos = p?.currentPosition?.toLong() ?: 0L
+        session.setPlaybackState(
+            PlaybackState.Builder()
+                .setActions(
+                    PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
+                        PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_SKIP_TO_NEXT or
+                        PlaybackState.ACTION_SKIP_TO_PREVIOUS or PlaybackState.ACTION_SEEK_TO or
+                        PlaybackState.ACTION_STOP
+                )
+                .setState(state, pos, 1f)
+                .build()
+        )
+    }
+
+    // ---------- Audio focus ----------
     private fun requestFocus() {
         val am = getSystemService(AudioManager::class.java)
         if (focusRequest == null) {
@@ -138,13 +266,13 @@ class PlayerService : Service() {
                             AudioManager.AUDIOFOCUS_LOSS -> {
                                 if (p.isPlaying) p.pause()
                                 pausedByFocus = false
-                                updateNotification()
+                                refreshAll()
                             }
                             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                                 if (p.isPlaying) {
                                     p.pause()
                                     pausedByFocus = true
-                                    updateNotification()
+                                    refreshAll()
                                 }
                             }
                             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> p.setVolume(0.3f, 0.3f)
@@ -153,7 +281,7 @@ class PlayerService : Service() {
                                 if (pausedByFocus) {
                                     p.start()
                                     pausedByFocus = false
-                                    updateNotification()
+                                    refreshAll()
                                 }
                             }
                         }
@@ -164,13 +292,14 @@ class PlayerService : Service() {
         am.requestAudioFocus(focusRequest!!)
     }
 
-    private fun serviceAction(label: String, action: String, code: Int): Notification.Action {
+    // ---------- Notificación estilo reproductor ----------
+    private fun iconAction(res: Int, label: String, action: String, code: Int): Notification.Action {
         val pi = PendingIntent.getService(
             this, code,
             Intent(this, PlayerService::class.java).setAction(action),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        return Notification.Action.Builder(null, label, pi).build()
+        return Notification.Action.Builder(Icon.createWithResource(this, res), label, pi).build()
     }
 
     private fun buildNotification(): Notification {
@@ -180,43 +309,56 @@ class PlayerService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
         return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle(currentTitle)
-            .setContentText("Audio Mover")
-            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setSmallIcon(R.drawable.ic_stat_music)
+            .setContentTitle(displayTitle)
+            .setContentText(artist)
+            .setLargeIcon(art ?: defaultArt)
             .setContentIntent(open)
-            .addAction(serviceAction("Anterior", ACTION_PREV, 1))
-            .addAction(serviceAction(if (playing) "Pausa" else "Play", ACTION_TOGGLE, 2))
-            .addAction(serviceAction("Siguiente", ACTION_NEXT, 3))
-            .addAction(serviceAction("Parar", ACTION_STOP, 4))
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setColor(Color.BLACK)
+            .setColorized(true)
+            .addAction(iconAction(R.drawable.ic_prev, "Anterior", ACTION_PREV, 1))
+            .addAction(
+                if (playing) iconAction(R.drawable.ic_pause, "Pausa", ACTION_TOGGLE, 2)
+                else iconAction(R.drawable.ic_play, "Reproducir", ACTION_TOGGLE, 2)
+            )
+            .addAction(iconAction(R.drawable.ic_next, "Siguiente", ACTION_NEXT, 3))
+            .setStyle(
+                Notification.MediaStyle()
+                    .setMediaSession(session.sessionToken)
+                    .setShowActionsInCompactView(0, 1, 2)
+            )
             .build()
     }
 
     private fun showForeground() {
         val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "Reproducción", NotificationManager.IMPORTANCE_LOW)
-        )
+        val channel = NotificationChannel(CHANNEL_ID, "Reproducción", NotificationManager.IMPORTANCE_LOW)
+        channel.lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        nm.createNotificationChannel(channel)
         startForeground(1, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
     }
 
-    private fun updateNotification() {
+    private fun refreshAll() {
+        updateSession()
         getSystemService(NotificationManager::class.java).notify(1, buildNotification())
     }
 
     private fun stopAll() {
-        player?.release()
-        player = null
+        releasePlayer()
         currentTitle = ""
         onTrackChanged?.invoke("")
+        session.isActive = false
         focusRequest?.let { getSystemService(AudioManager::class.java).abandonAudioFocusRequest(it) }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     override fun onDestroy() {
-        player?.release()
-        player = null
+        releasePlayer()
+        session.release()
         super.onDestroy()
     }
 }
