@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="navy">#14161F</color>
+    <color name="soft">#F1F2F6</color>
+    <color name="gray">#6B7280</color>
+    <color name="welcome_blue">#80CDEA</color>
+    <color name="player_bg">#ECEBE6</color>
+</resources>

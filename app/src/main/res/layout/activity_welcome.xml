@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/welcomeRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/welcome_blue"
+    android:clickable="true"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:paddingStart="24dp"
+    android:paddingEnd="24dp">
+
+    <TextView
+        android:id="@+id/w1"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:fontFamily="sans-serif-condensed"
+        android:includeFontPadding="false"
+        android:text="AQUÍ EMPIEZA"
+        android:textColor="#111111"
+        android:textSize="40sp" />
+
+    <TextView
+        android:id="@+id/w2"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:fontFamily="sans-serif-condensed"
+        android:includeFontPadding="false"
+        android:text="TU DÍA"
+        android:textColor="#111111"
+        android:textSize="76sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/w3"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:fontFamily="sans-serif-condensed"
+        android:includeFontPadding="false"
+        android:text="TODO ES MEJOR"
+        android:textColor="#111111"
+        android:textSize="40sp" />
+
+    <TextView
+        android:id="@+id/w4"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:fontFamily="sans-serif-condensed"
+        android:includeFontPadding="false"
+        android:text="CON MÚSICA"
+        android:textColor="#111111"
+        android:textSize="46sp"
+        android:textStyle="bold" />
+
+    <com.example.audiomover.LogoView
+        android:id="@+id/logo"
+        android:layout_width="match_parent"
+        android:layout_height="190dp"
+        android:layout_marginTop="36dp" />
+
+    <LinearLayout
+        android:id="@+id/wName"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:orientation="horizontal">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:letterSpacing="0.08"
+            android:text="MOODI"
+            android:textColor="#FFFFFF"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:fontFamily="sans-serif-light"
+            android:letterSpacing="0.08"
+            android:text=" SONG"
+            android:textColor="#FFFFFF"
+            android:textSize="22sp" />
+    </LinearLayout>
+</LinearLayout>

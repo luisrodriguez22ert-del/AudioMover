@@ -44,6 +44,9 @@ class PlayerService : Service() {
         var currentTitle: String = ""
         var onTrackChanged: ((String) -> Unit)? = null
         var playerRef: MediaPlayer? = null
+        var currentDisplayTitle: String = ""
+        var currentArtist: String = ""
+        var currentArt: Bitmap? = null
 
         var shuffle = false
         var repeatMode = 0 // 0 = no repetir, 1 = toda la lista, 2 = una canción
@@ -57,7 +60,7 @@ class PlayerService : Service() {
     private var failures = 0
 
     private var displayTitle = ""
-    private var artist = "Audio Mover"
+    private var artist = "MOODI Song"
     private var art: Bitmap? = null
     private var durationMs = 0L
 
@@ -161,11 +164,14 @@ class PlayerService : Service() {
         val file = titles.getOrElse(i) { "Reproduciendo" }
         currentTitle = file
         displayTitle = file.substringBeforeLast('.')
-        artist = "Audio Mover"
+        artist = "MOODI Song"
         art = null
         durationMs = 0L
         showForeground()
         loadMeta(uris[i])
+        currentDisplayTitle = displayTitle
+        currentArtist = artist
+        currentArt = art ?: defaultArt
         onTrackChanged?.invoke(file)
         requestFocus()
         releasePlayer()
@@ -418,6 +424,9 @@ class PlayerService : Service() {
     private fun stopAll() {
         releasePlayer()
         currentTitle = ""
+        currentDisplayTitle = ""
+        currentArtist = ""
+        currentArt = null
         failures = 0
         onTrackChanged?.invoke("")
         session.isActive = false

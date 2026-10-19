@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -19,13 +20,13 @@ import android.provider.MediaStore
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.LayoutInflater
-import android.view.Menu
-import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
+import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.SeekBar
 import android.widget.TextView
@@ -33,20 +34,33 @@ import android.widget.Toast
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import kotlin.math.roundToInt
 
 private const val REQ_MOVE = 100
 private const val REQ_DELETE = 101
 private const val LIB_PATH = "Music/AudioMover/"
 private const val MENU_MOVE_ALL = 10
 private const val MENU_AUTO = 11
-private val ACTIVE = Color.parseColor("#1E40AF")
-private val INACTIVE = Color.parseColor("#555555")
+private val NAVY = Color.parseColor("#14161F")
+private val GRAY = Color.parseColor("#9CA3AF")
+private val ACTIVE = Color.parseColor("#1E88C8")
+private val INACTIVE = Color.parseColor("#9A9A94")
+private val PLAYER_BG = Color.parseColor("#ECEBE6")
 
-data class Audio(val id: Long, val uri: Uri, val name: String, val folder: String)
+data class Audio(
+    val id: Long,
+    val uri: Uri,
+    val name: String,
+    val title: String,
+    val artist: String,
+    val durationMs: Long
+)
 
 class VH(v: View) : RecyclerView.ViewHolder(v) {
     val name: TextView = v.findViewById(R.id.name)
-    val folder: TextView = v.findViewById(R.id.folder)
+    val sub: TextView = v.findViewById(R.id.sub)
+    val num: TextView = v.findViewById(R.id.num)
+    val eq: ImageView = v.findViewById(R.id.eq)
     val menu: ImageButton = v.findViewById(R.id.menu)
 }
 
@@ -55,26 +69,41 @@ class MainActivity : Activity() {
     private val downloads = mutableListOf<Audio>()
     private val library = mutableListOf<Audio>()
     private var shown: MutableList<Audio> = downloads
-    private var inLibrary = false
+    private var tab = 1 // 0 = Descargas, 1 = Mi música, 2 = Buscar
+    private val navTabs = intArrayOf(0, 2, 1)
     private var query = ""
     private var autoMove = true
     private var pendingUris: List<Uri> = emptyList()
     private var lastPlaying = false
+    private var dragging = false
 
     private lateinit var prefs: SharedPreferences
+    private lateinit var audio: AudioManager
     private lateinit var recycler: RecyclerView
+    private lateinit var adapter: AudioAdapter
     private lateinit var status: TextView
     private lateinit var search: EditText
-    private lateinit var btnDownloads: Button
-    private lateinit var btnLibrary: Button
-    private lateinit var btnShuffle: ImageButton
-    private lateinit var btnRepeat: ImageButton
-    private lateinit var btnToggle: ImageButton
-    private lateinit var adapter: AudioAdapter
+    private lateinit var headerBox: View
+    private lateinit var searchBox: View
+    private lateinit var tvTitle: TextView
+    private lateinit var tvMeta: TextView
+    private lateinit var tvSub: TextView
+    private lateinit var navItems: List<LinearLayout>
+    private lateinit var miniPlayer: View
+    private lateinit var miniArt: ImageView
+    private lateinit var miniTitle: TextView
+    private lateinit var miniArtist: TextView
+    private lateinit var miniToggle: ImageButton
+    private lateinit var screenPlayer: View
+    private lateinit var pTitle: TextView
+    private lateinit var pArtist: TextView
+    private lateinit var disc: DiscView
     private lateinit var seek: SeekBar
     private lateinit var tvPos: TextView
     private lateinit var tvDur: TextView
-    private var dragging = false
+    private lateinit var btnShuffle: ImageButton
+    private lateinit var btnRepeat: ImageButton
+    private lateinit var btnToggle: ImageButton
 
     private val ticker = Handler(Looper.getMainLooper())
     private val tick = object : Runnable {
@@ -91,13 +120,13 @@ class MainActivity : Activity() {
                 try {
                     playing = p.isPlaying
                     if (!dragging) {
-                        val d = p.duration
-                        val c = p.currentPosition
-                        if (d > 0) {
-                            seek.max = d
-                            seek.progress = c
-                            tvPos.text = fmt(c)
-                            tvDur.text = fmt(d)
+                        val dur = p.duration
+                        val cur = p.currentPosition
+                        if (dur > 0) {
+                            seek.max = dur
+                            seek.progress = cur
+                            tvPos.text = fmt(cur)
+                            tvDur.text = fmt(dur)
                         }
                     }
                 } catch (e: Exception) {
@@ -105,8 +134,11 @@ class MainActivity : Activity() {
             }
             if (playing != lastPlaying) {
                 lastPlaying = playing
-                btnToggle.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)
+                val res = if (playing) R.drawable.ic_pause else R.drawable.ic_play
+                btnToggle.setImageResource(res)
+                miniToggle.setImageResource(res)
             }
+            if (screenPlayer.visibility == View.VISIBLE) disc.setVolumeExternal(currentVolume())
             ticker.postDelayed(this, 500)
         }
     }
@@ -116,6 +148,7 @@ class MainActivity : Activity() {
         setContentView(R.layout.activity_main)
 
         prefs = getSharedPreferences("prefs", MODE_PRIVATE)
+        audio = getSystemService(AudioManager::class.java)
         autoMove = prefs.getBoolean("auto", true)
         PlayerService.shuffle = prefs.getBoolean("shuffle", false)
         PlayerService.repeatMode = prefs.getInt("repeat", 0)
@@ -123,31 +156,48 @@ class MainActivity : Activity() {
         recycler = findViewById(R.id.recycler)
         status = findViewById(R.id.status)
         search = findViewById(R.id.search)
-        btnDownloads = findViewById(R.id.btnDownloads)
-        btnLibrary = findViewById(R.id.btnLibrary)
-        btnShuffle = findViewById(R.id.btnShuffle)
-        btnRepeat = findViewById(R.id.btnRepeat)
-        btnToggle = findViewById(R.id.btnToggle)
+        headerBox = findViewById(R.id.headerBox)
+        searchBox = findViewById(R.id.searchBox)
+        tvTitle = findViewById(R.id.tvTitle)
+        tvMeta = findViewById(R.id.tvMeta)
+        tvSub = findViewById(R.id.tvSub)
+        navItems = listOf(
+            findViewById<LinearLayout>(R.id.navDownloads),
+            findViewById<LinearLayout>(R.id.navSearch),
+            findViewById<LinearLayout>(R.id.navLibrary)
+        )
+        miniPlayer = findViewById(R.id.miniPlayer)
+        miniArt = findViewById(R.id.miniArt)
+        miniTitle = findViewById(R.id.miniTitle)
+        miniArtist = findViewById(R.id.miniArtist)
+        miniToggle = findViewById(R.id.miniToggle)
+        screenPlayer = findViewById(R.id.screenPlayer)
+        pTitle = findViewById(R.id.pTitle)
+        pArtist = findViewById(R.id.pArtist)
+        disc = findViewById(R.id.disc)
         seek = findViewById(R.id.seek)
         tvPos = findViewById(R.id.tvPos)
         tvDur = findViewById(R.id.tvDur)
+        btnShuffle = findViewById(R.id.btnShuffle)
+        btnRepeat = findViewById(R.id.btnRepeat)
+        btnToggle = findViewById(R.id.btnToggle)
 
         adapter = AudioAdapter()
         recycler.layoutManager = LinearLayoutManager(this)
         recycler.adapter = adapter
 
-        // Arrastrar para reordenar (mantener pulsado) solo en "Mi música" y sin búsqueda activa
+        // Arrastrar para reordenar (mantener pulsado) solo en "Mi música"
         val callback = object : ItemTouchHelper.SimpleCallback(
             ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0
         ) {
-            override fun isLongPressDragEnabled(): Boolean = inLibrary && query.trim().isEmpty()
+            override fun isLongPressDragEnabled(): Boolean = tab == 1
 
             override fun onMove(
                 rv: RecyclerView,
                 vh: RecyclerView.ViewHolder,
                 target: RecyclerView.ViewHolder
             ): Boolean {
-                if (!inLibrary || query.trim().isNotEmpty()) return false
+                if (tab != 1) return false
                 val from = vh.bindingAdapterPosition
                 val to = target.bindingAdapterPosition
                 if (from == RecyclerView.NO_POSITION || to == RecyclerView.NO_POSITION) return false
@@ -160,13 +210,18 @@ class MainActivity : Activity() {
 
             override fun clearView(rv: RecyclerView, vh: RecyclerView.ViewHolder) {
                 super.clearView(rv, vh)
-                if (inLibrary && query.trim().isEmpty()) saveOrder()
+                if (tab == 1) {
+                    saveOrder()
+                    rv.post { adapter.notifyDataSetChanged() }
+                }
             }
         }
         ItemTouchHelper(callback).attachToRecyclerView(recycler)
 
-        btnDownloads.setOnClickListener { inLibrary = false; refresh() }
-        btnLibrary.setOnClickListener { inLibrary = true; refresh() }
+        // Navegación inferior
+        for (i in navItems.indices) {
+            navItems[i].setOnClickListener { setTab(navTabs[i]) }
+        }
 
         search.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -174,27 +229,36 @@ class MainActivity : Activity() {
             override fun afterTextChanged(s: Editable?) {
                 query = s?.toString() ?: ""
                 applyFilter()
+                updateHeader()
             }
         })
 
-        seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
-                if (fromUser) tvPos.text = fmt(progress)
+        findViewById<View>(R.id.btnPlayAll).setOnClickListener {
+            if (shown.isEmpty()) toast("No hay canciones aquí") else playFrom(0)
+        }
+        findViewById<View>(R.id.btnShuffleAll).setOnClickListener {
+            if (shown.isEmpty()) {
+                toast("No hay canciones aquí")
+            } else {
+                PlayerService.shuffle = true
+                prefs.edit().putBoolean("shuffle", true).apply()
+                updateModeButtons()
+                playFrom((0 until shown.size).random())
             }
+        }
+        findViewById<View>(R.id.btnMenu).setOnClickListener { showTopMenu(it) }
 
-            override fun onStartTrackingTouch(sb: SeekBar) {
-                dragging = true
-            }
-
-            override fun onStopTrackingTouch(sb: SeekBar) {
-                dragging = false
-                startService(
-                    Intent(this@MainActivity, PlayerService::class.java)
-                        .setAction(PlayerService.ACTION_SEEK)
-                        .putExtra("pos", sb.progress)
-                )
-            }
-        })
+        // Mini reproductor y pantalla del reproductor
+        miniPlayer.setOnClickListener { openPlayer() }
+        miniToggle.setOnClickListener { sendToService(PlayerService.ACTION_TOGGLE) }
+        findViewById<View>(R.id.btnBack).setOnClickListener { closePlayer() }
+        findViewById<ImageButton>(R.id.btnStop).setOnClickListener {
+            sendToService(PlayerService.ACTION_STOP)
+            closePlayer()
+        }
+        findViewById<ImageButton>(R.id.btnPrev).setOnClickListener { sendToService(PlayerService.ACTION_PREV) }
+        btnToggle.setOnClickListener { sendToService(PlayerService.ACTION_TOGGLE) }
+        findViewById<ImageButton>(R.id.btnNext).setOnClickListener { sendToService(PlayerService.ACTION_NEXT) }
 
         btnShuffle.setOnClickListener {
             PlayerService.shuffle = !PlayerService.shuffle
@@ -215,10 +279,31 @@ class MainActivity : Activity() {
                 }
             )
         }
-        findViewById<ImageButton>(R.id.btnPrev).setOnClickListener { sendToService(PlayerService.ACTION_PREV) }
-        btnToggle.setOnClickListener { sendToService(PlayerService.ACTION_TOGGLE) }
-        findViewById<ImageButton>(R.id.btnNext).setOnClickListener { sendToService(PlayerService.ACTION_NEXT) }
-        findViewById<ImageButton>(R.id.btnStop).setOnClickListener { sendToService(PlayerService.ACTION_STOP) }
+
+        seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) tvPos.text = fmt(progress)
+            }
+
+            override fun onStartTrackingTouch(sb: SeekBar) {
+                dragging = true
+            }
+
+            override fun onStopTrackingTouch(sb: SeekBar) {
+                dragging = false
+                startService(
+                    Intent(this@MainActivity, PlayerService::class.java)
+                        .setAction(PlayerService.ACTION_SEEK)
+                        .putExtra("pos", sb.progress)
+                )
+            }
+        })
+
+        // Volumen con el arco del disco
+        disc.onVolumeChange = { v ->
+            val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            audio.setStreamVolume(AudioManager.STREAM_MUSIC, (v * max).roundToInt(), 0)
+        }
 
         updateModeButtons()
         askPermissions()
@@ -231,7 +316,7 @@ class MainActivity : Activity() {
         if (hasAudioPermission()) {
             loadAudios()
         } else {
-            status.text = "Falta el permiso de audio. Actívalo en Ajustes > Apps > Audio Mover."
+            status.text = "Falta el permiso de audio. Actívalo en Ajustes > Apps > MOODI Song."
         }
     }
 
@@ -241,30 +326,33 @@ class MainActivity : Activity() {
         super.onPause()
     }
 
-    // ---------- Menú superior ----------
-    override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        menu.add(0, MENU_MOVE_ALL, 0, "Pasar todo a Mi música")
-        val auto = menu.add(0, MENU_AUTO, 1, "Pasar automáticamente")
-        auto.isCheckable = true
-        auto.isChecked = autoMove
-        return true
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (screenPlayer.visibility == View.VISIBLE) closePlayer() else super.onBackPressed()
     }
 
-    override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        when (item.itemId) {
-            MENU_MOVE_ALL -> {
-                if (downloads.isEmpty()) toast("No hay audios en Descargas")
-                else requestMove(downloads.toList())
+    // ---------- Menú superior ----------
+    private fun showTopMenu(anchor: View) {
+        val pm = PopupMenu(this, anchor)
+        pm.menu.add(0, MENU_MOVE_ALL, 0, "Pasar todo a Mi música")
+        val auto = pm.menu.add(0, MENU_AUTO, 1, "Pasar automáticamente")
+        auto.isCheckable = true
+        auto.isChecked = autoMove
+        pm.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                MENU_MOVE_ALL -> {
+                    if (downloads.isEmpty()) toast("No hay audios en Descargas")
+                    else requestMove(downloads.toList())
+                }
+                MENU_AUTO -> {
+                    autoMove = !autoMove
+                    prefs.edit().putBoolean("auto", autoMove).apply()
+                    toast(if (autoMove) "Paso automático activado" else "Paso automático desactivado")
+                }
             }
-            MENU_AUTO -> {
-                autoMove = !autoMove
-                item.isChecked = autoMove
-                prefs.edit().putBoolean("auto", autoMove).apply()
-                toast(if (autoMove) "Paso automático activado" else "Paso automático desactivado")
-            }
-            else -> return super.onOptionsItemSelected(item)
+            true
         }
-        return true
+        pm.show()
     }
 
     // ---------- Permisos ----------
@@ -293,7 +381,10 @@ class MainActivity : Activity() {
         val projection = arrayOf(
             MediaStore.Audio.Media._ID,
             MediaStore.Audio.Media.DISPLAY_NAME,
-            MediaStore.Audio.Media.RELATIVE_PATH
+            MediaStore.Audio.Media.RELATIVE_PATH,
+            MediaStore.Audio.Media.TITLE,
+            MediaStore.Audio.Media.ARTIST,
+            MediaStore.Audio.Media.DURATION
         )
         try {
             contentResolver.query(
@@ -304,10 +395,15 @@ class MainActivity : Activity() {
                     val id = c.getLong(0)
                     val name = c.getString(1) ?: "?"
                     val path = c.getString(2) ?: ""
-                    val audio = Audio(id, ContentUris.withAppendedId(collection, id), name, path)
+                    val title = c.getString(3)?.takeIf { it.isNotBlank() } ?: name.substringBeforeLast('.')
+                    val artist = c.getString(4) ?: ""
+                    val a = Audio(
+                        id, ContentUris.withAppendedId(collection, id),
+                        name, title, artist, c.getLong(5)
+                    )
                     when {
-                        path.startsWith(LIB_PATH) -> lib.add(audio)
-                        path.startsWith("Download") -> dl.add(audio)
+                        path.startsWith(LIB_PATH) -> lib.add(a)
+                        path.startsWith("Download") -> dl.add(a)
                     }
                 }
             }
@@ -355,28 +451,91 @@ class MainActivity : Activity() {
         prefs.edit().putString("order", library.joinToString(",") { it.id.toString() }).apply()
     }
 
+    // ---------- Pestañas, búsqueda y cabecera ----------
+    private fun setTab(t: Int) {
+        tab = t
+        refresh()
+        if (t == 2) {
+            search.requestFocus()
+            search.post {
+                getSystemService(InputMethodManager::class.java)
+                    .showSoftInput(search, InputMethodManager.SHOW_IMPLICIT)
+            }
+        } else {
+            search.clearFocus()
+            getSystemService(InputMethodManager::class.java)
+                .hideSoftInputFromWindow(search.windowToken, 0)
+        }
+    }
+
     private fun applyFilter() {
-        val src = if (inLibrary) library else downloads
-        val q = query.trim()
-        shown = if (q.isEmpty()) src else src.filter { it.name.contains(q, ignoreCase = true) }.toMutableList()
+        shown = when (tab) {
+            0 -> downloads
+            1 -> library
+            else -> {
+                val q = query.trim()
+                if (q.isEmpty()) mutableListOf()
+                else (library + downloads).filter {
+                    it.title.contains(q, ignoreCase = true) ||
+                        it.name.contains(q, ignoreCase = true) ||
+                        it.artist.contains(q, ignoreCase = true)
+                }.toMutableList()
+            }
+        }
         adapter.notifyDataSetChanged()
     }
 
+    private fun updateNav() {
+        for (i in navItems.indices) {
+            val sel = navTabs[i] == tab
+            val item = navItems[i]
+            (item.getChildAt(0) as ImageView).imageTintList =
+                ColorStateList.valueOf(if (sel) NAVY else GRAY)
+            val label = item.getChildAt(1) as TextView
+            label.setTextColor(if (sel) NAVY else GRAY)
+            label.setTypeface(null, if (sel) Typeface.BOLD else Typeface.NORMAL)
+        }
+    }
+
+    private fun songs(n: Int) = if (n == 1) "1 canción" else "$n canciones"
+
+    private fun updateHeader() {
+        val isSearch = tab == 2
+        headerBox.visibility = if (isSearch) View.GONE else View.VISIBLE
+        searchBox.visibility = if (isSearch) View.VISIBLE else View.GONE
+        if (!isSearch) {
+            tvTitle.text = if (tab == 0) "Descargas" else "Mi música"
+            tvMeta.text = (if (tab == 0) "Carpeta · " else "Lista · ") + songs(shown.size)
+            tvSub.text = "MOODI Song"
+        }
+        status.text = when {
+            isSearch && query.trim().isEmpty() -> "Escribe para buscar en toda tu música"
+            isSearch -> "${shown.size} resultados"
+            tab == 1 -> "Mantén pulsado y arrastra para cambiar el orden"
+            else -> "Con los tres puntos pasa canciones a Mi música o elimínalas"
+        }
+    }
+
     private fun refresh() {
-        btnDownloads.text = "Descargas (${downloads.size})"
-        btnLibrary.text = "Mi música (${library.size})"
-        btnDownloads.alpha = if (inLibrary) 0.5f else 1f
-        btnLibrary.alpha = if (inLibrary) 1f else 0.5f
+        updateNav()
         applyFilter()
         showNow(PlayerService.currentTitle)
     }
 
     private fun showNow(title: String) {
-        status.text = when {
-            title.isNotEmpty() -> "Reproduciendo: $title"
-            inLibrary -> "Toca para reproducir. Mantén pulsado y arrastra para cambiar el orden."
-            else -> "Toca para reproducir. Con los tres puntos puedes pasar a Mi música o eliminar."
+        val active = title.isNotEmpty()
+        miniPlayer.visibility = if (active) View.VISIBLE else View.GONE
+        if (active) {
+            miniTitle.text = PlayerService.currentDisplayTitle
+            miniArtist.text = PlayerService.currentArtist
+            miniArt.setImageBitmap(PlayerService.currentArt)
+            pTitle.text = PlayerService.currentDisplayTitle
+            pArtist.text = PlayerService.currentArtist
+            disc.cover = PlayerService.currentArt
+        } else if (screenPlayer.visibility == View.VISIBLE) {
+            closePlayer()
         }
+        updateHeader()
         adapter.notifyDataSetChanged()
     }
 
@@ -387,6 +546,27 @@ class MainActivity : Activity() {
         )
         btnRepeat.imageTintList =
             ColorStateList.valueOf(if (PlayerService.repeatMode != 0) ACTIVE else INACTIVE)
+    }
+
+    // ---------- Pantalla del reproductor ----------
+    private fun openPlayer() {
+        if (PlayerService.currentTitle.isEmpty()) return
+        screenPlayer.visibility = View.VISIBLE
+        window.statusBarColor = PLAYER_BG
+        window.navigationBarColor = PLAYER_BG
+        disc.setVolumeExternal(currentVolume())
+        showNow(PlayerService.currentTitle)
+    }
+
+    private fun closePlayer() {
+        screenPlayer.visibility = View.GONE
+        window.statusBarColor = Color.WHITE
+        window.navigationBarColor = Color.WHITE
+    }
+
+    private fun currentVolume(): Float {
+        val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        return if (max > 0) audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / max else 0f
     }
 
     // ---------- Reproducir ----------
@@ -406,8 +586,9 @@ class MainActivity : Activity() {
 
     // ---------- Mover y eliminar ----------
     private fun showMenu(anchor: View, a: Audio) {
+        val inLib = library.any { it.id == a.id }
         val pm = PopupMenu(this, anchor)
-        if (!inLibrary) pm.menu.add(0, 1, 0, "Pasar a Mi música")
+        if (!inLib) pm.menu.add(0, 1, 0, "Pasar a Mi música")
         pm.menu.add(0, 2, 1, "Eliminar")
         pm.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -461,6 +642,12 @@ class MainActivity : Activity() {
         return "%d:%02d".format(s / 60, s % 60)
     }
 
+    private fun subtitle(a: Audio): String {
+        val who = if (a.artist.isBlank() || a.artist == MediaStore.UNKNOWN_STRING)
+            "Artista desconocido" else a.artist
+        return who + " · " + fmt(a.durationMs.toInt())
+    }
+
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 
     // ---------- Adaptador ----------
@@ -472,12 +659,13 @@ class MainActivity : Activity() {
 
         override fun onBindViewHolder(h: VH, position: Int) {
             val a = shown[position]
-            h.name.text = a.name
-            h.folder.text = a.folder
-            h.name.setTypeface(
-                null,
-                if (a.name == PlayerService.currentTitle) Typeface.BOLD else Typeface.NORMAL
-            )
+            val playing = a.name == PlayerService.currentTitle
+            h.name.text = a.title
+            h.sub.text = subtitle(a)
+            h.num.text = "%02d".format(position + 1)
+            h.num.visibility = if (playing) View.INVISIBLE else View.VISIBLE
+            h.eq.visibility = if (playing) View.VISIBLE else View.GONE
+            h.itemView.setBackgroundResource(if (playing) R.drawable.bg_playing else 0)
             h.menu.setOnClickListener { showMenu(it, a) }
             h.itemView.setOnClickListener {
                 val pos = h.bindingAdapterPosition

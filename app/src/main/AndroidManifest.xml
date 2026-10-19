@@ -10,18 +10,23 @@
 
     <application
         android:icon="@drawable/ic_launcher"
-        android:label="Audio Mover"
-        android:theme="@android:style/Theme.Material.Light.DarkActionBar">
+        android:label="MOODI Song"
+        android:theme="@style/AppTheme">
 
         <activity
-            android:name=".MainActivity"
-            android:windowSoftInputMode="stateHidden"
-            android:exported="true">
+            android:name=".WelcomeActivity"
+            android:exported="true"
+            android:theme="@style/WelcomeTheme">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:windowSoftInputMode="stateHidden|adjustResize" />
 
         <service
             android:name=".PlayerService"
